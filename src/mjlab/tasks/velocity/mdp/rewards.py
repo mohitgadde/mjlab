@@ -310,7 +310,8 @@ class variable_posture:
     assert default_joint_pos is not None
     self.default_joint_pos = default_joint_pos
 
-    _, joint_names = asset.find_joints(cfg.params["asset_cfg"].joint_names)
+    joint_ids, joint_names = asset.find_joints(cfg.params["asset_cfg"].joint_names)
+    self._joint_ids = torch.tensor(joint_ids, device=env.device, dtype=torch.long)
 
     _, _, std_standing = resolve_matching_names_values(
       data=cfg.params["std_standing"],
@@ -331,6 +332,8 @@ class variable_posture:
       list_of_strings=joint_names,
     )
     self.std_running = torch.tensor(std_running, device=env.device, dtype=torch.float32)
+
+    self._joint_qpos_widths = asset.indexing.joint_qpos_widths[self._joint_ids]
 
   def __call__(
     self,
@@ -359,14 +362,20 @@ class variable_posture:
     ).float()
     running_mask = (total_speed >= running_threshold).float()
 
+    # Expand std to qpos dimensions for ball joints.
+    std_standing_exp = self.std_standing.repeat_interleave(self._joint_qpos_widths)
+    std_walking_exp = self.std_walking.repeat_interleave(self._joint_qpos_widths)
+    std_running_exp = self.std_running.repeat_interleave(self._joint_qpos_widths)
+
     std = (
-      self.std_standing * standing_mask.unsqueeze(1)
-      + self.std_walking * walking_mask.unsqueeze(1)
-      + self.std_running * running_mask.unsqueeze(1)
+      std_standing_exp * standing_mask.unsqueeze(1)
+      + std_walking_exp * walking_mask.unsqueeze(1)
+      + std_running_exp * running_mask.unsqueeze(1)
     )
 
-    current_joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
-    desired_joint_pos = self.default_joint_pos[:, asset_cfg.joint_ids]
+    q_indices = asset.indexing.expand_to_q_indices(self._joint_ids)
+    current_joint_pos = asset.data.joint_pos[:, q_indices]
+    desired_joint_pos = self.default_joint_pos[:, q_indices]
     error_squared = torch.square(current_joint_pos - desired_joint_pos)
 
     return torch.exp(-torch.mean(error_squared / (std**2), dim=1))

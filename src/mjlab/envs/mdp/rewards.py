@@ -42,7 +42,8 @@ def joint_vel_l2(
 ) -> torch.Tensor:
   """Penalize joint velocities on the articulation using L2 squared kernel."""
   asset: Entity = env.scene[asset_cfg.name]
-  return torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
+  v_indices = asset.indexing.expand_to_v_indices(asset_cfg.joint_ids)
+  return torch.sum(torch.square(asset.data.joint_vel[:, v_indices]), dim=1)
 
 
 def joint_acc_l2(
@@ -50,7 +51,8 @@ def joint_acc_l2(
 ) -> torch.Tensor:
   """Penalize joint accelerations on the articulation using L2 squared kernel."""
   asset: Entity = env.scene[asset_cfg.name]
-  return torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
+  v_indices = asset.indexing.expand_to_v_indices(asset_cfg.joint_ids)
+  return torch.sum(torch.square(asset.data.joint_acc[:, v_indices]), dim=1)
 
 
 def action_rate_l2(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -77,14 +79,25 @@ def joint_pos_limits(
   asset: Entity = env.scene[asset_cfg.name]
   soft_joint_pos_limits = asset.data.soft_joint_pos_limits
   assert soft_joint_pos_limits is not None
-  out_of_limits = -(
-    asset.data.joint_pos[:, asset_cfg.joint_ids]
-    - soft_joint_pos_limits[:, asset_cfg.joint_ids, 0]
-  ).clip(max=0.0)
-  out_of_limits += (
-    asset.data.joint_pos[:, asset_cfg.joint_ids]
-    - soft_joint_pos_limits[:, asset_cfg.joint_ids, 1]
-  ).clip(min=0.0)
+
+  q_indices = asset.indexing.expand_to_q_indices(asset_cfg.joint_ids)
+  joint_pos = asset.data.joint_pos[:, q_indices]
+
+  joint_ids = asset_cfg.joint_ids
+  if isinstance(joint_ids, slice):
+    joint_ids_tensor = torch.arange(asset.num_joints, device=env.device)
+  elif isinstance(joint_ids, list):
+    joint_ids_tensor = torch.tensor(joint_ids, device=env.device)
+  else:
+    joint_ids_tensor = joint_ids
+
+  # Expand limits to qpos dimensions for ball joints.
+  limits = soft_joint_pos_limits[:, joint_ids_tensor]
+  qpos_widths = asset.indexing.joint_qpos_widths[joint_ids_tensor]
+  expanded_limits = limits.repeat_interleave(qpos_widths, dim=1)
+
+  out_of_limits = -(joint_pos - expanded_limits[..., 0]).clip(max=0.0)
+  out_of_limits += (joint_pos - expanded_limits[..., 1]).clip(min=0.0)
   return torch.sum(out_of_limits, dim=1)
 
 
@@ -101,25 +114,29 @@ class posture:
     assert default_joint_pos is not None
     self.default_joint_pos = default_joint_pos
 
-    _, joint_names = asset.find_joints(
+    joint_ids, joint_names = asset.find_joints(
       cfg.params["asset_cfg"].joint_names,
     )
+    self._joint_ids = torch.tensor(joint_ids, device=env.device, dtype=torch.long)
 
     _, _, std = resolve_matching_names_values(
       data=cfg.params["std"],
       list_of_strings=joint_names,
     )
     self.std = torch.tensor(std, device=env.device, dtype=torch.float32)
+    self._joint_qpos_widths = asset.indexing.joint_qpos_widths[self._joint_ids]
 
   def __call__(
     self, env: ManagerBasedRlEnv, std, asset_cfg: SceneEntityCfg
   ) -> torch.Tensor:
     del std  # Unused.
     asset: Entity = env.scene[asset_cfg.name]
-    current_joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
-    desired_joint_pos = self.default_joint_pos[:, asset_cfg.joint_ids]
+    q_indices = asset.indexing.expand_to_q_indices(self._joint_ids)
+    current_joint_pos = asset.data.joint_pos[:, q_indices]
+    desired_joint_pos = self.default_joint_pos[:, q_indices]
     error_squared = torch.square(current_joint_pos - desired_joint_pos)
-    return torch.exp(-torch.mean(error_squared / (self.std**2), dim=1))
+    std_expanded = self.std.repeat_interleave(self._joint_qpos_widths)
+    return torch.exp(-torch.mean(error_squared / (std_expanded**2), dim=1))
 
 
 class electrical_power_cost:
@@ -134,13 +151,14 @@ class electrical_power_cost:
     actuator_ids, _ = asset.find_actuators(
       cfg.params["asset_cfg"].joint_names,
     )
-    self._joint_ids = torch.tensor(joint_ids, device=env.device, dtype=torch.long)
+    joint_ids_tensor = torch.tensor(joint_ids, device=env.device, dtype=torch.long)
+    self._v_indices = asset.indexing.expand_to_v_indices(joint_ids_tensor)
     self._actuator_ids = torch.tensor(actuator_ids, device=env.device, dtype=torch.long)
 
   def __call__(self, env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     asset: Entity = env.scene[asset_cfg.name]
     tau = asset.data.actuator_force[:, self._actuator_ids]
-    qd = asset.data.joint_vel[:, self._joint_ids]
+    qd = asset.data.joint_vel[:, self._v_indices]
     mech = tau * qd
     mech_pos = torch.clamp(mech, min=0.0)  # Don't penalize regen.
     return torch.sum(mech_pos, dim=1)

@@ -186,17 +186,33 @@ def reset_joints_by_offset(
   soft_joint_pos_limits = asset.data.soft_joint_pos_limits
   assert soft_joint_pos_limits is not None
 
-  joint_pos = default_joint_pos[env_ids][:, asset_cfg.joint_ids].clone()
-  joint_pos += sample_uniform(*position_range, joint_pos.shape, env.device)
-  joint_pos_limits = soft_joint_pos_limits[env_ids][:, asset_cfg.joint_ids]
-  joint_pos = joint_pos.clamp_(joint_pos_limits[..., 0], joint_pos_limits[..., 1])
+  q_indices = asset.indexing.expand_to_q_indices(asset_cfg.joint_ids)
+  v_indices = asset.indexing.expand_to_v_indices(asset_cfg.joint_ids)
 
-  joint_vel = default_joint_vel[env_ids][:, asset_cfg.joint_ids].clone()
-  joint_vel += sample_uniform(*velocity_range, joint_vel.shape, env.device)
+  joint_pos = default_joint_pos[env_ids][:, q_indices].clone()
+  joint_pos += sample_uniform(*position_range, joint_pos.shape, env.device)
 
   joint_ids = asset_cfg.joint_ids
-  if isinstance(joint_ids, list):
-    joint_ids = torch.tensor(joint_ids, device=env.device)
+  if isinstance(joint_ids, slice):
+    joint_ids_tensor = torch.arange(asset.num_joints, device=env.device)
+  elif isinstance(joint_ids, list):
+    joint_ids_tensor = torch.tensor(joint_ids, device=env.device)
+  else:
+    joint_ids_tensor = joint_ids
+
+  # Expand limits to qpos dimensions for ball joints.
+  joint_limits = soft_joint_pos_limits[env_ids][:, joint_ids_tensor]
+  qpos_widths = asset.indexing.joint_qpos_widths[joint_ids_tensor]
+  expanded_limits = joint_limits.repeat_interleave(qpos_widths, dim=1)
+  joint_pos = joint_pos.clamp_(expanded_limits[..., 0], expanded_limits[..., 1])
+
+  joint_vel = default_joint_vel[env_ids][:, v_indices].clone()
+  joint_vel += sample_uniform(*velocity_range, joint_vel.shape, env.device)
+
+  if isinstance(asset_cfg.joint_ids, list):
+    joint_ids = torch.tensor(asset_cfg.joint_ids, device=env.device)
+  else:
+    joint_ids = asset_cfg.joint_ids
 
   asset.write_joint_state_to_sim(
     joint_pos.view(len(env_ids), -1),
@@ -376,9 +392,11 @@ def _get_entity_indices(
 ) -> torch.Tensor:
   match spec.entity_type:
     case "dof":
-      return indexing.joint_v_adr[asset_cfg.joint_ids]
+      v_indices = indexing.expand_to_v_indices(asset_cfg.joint_ids)
+      return indexing.joint_v_adr[v_indices]
     case "joint" if spec.use_address:
-      return indexing.joint_q_adr[asset_cfg.joint_ids]
+      q_indices = indexing.expand_to_q_indices(asset_cfg.joint_ids)
+      return indexing.joint_q_adr[q_indices]
     case "joint":
       return indexing.joint_ids[asset_cfg.joint_ids]
     case "body":
@@ -741,24 +759,24 @@ def randomize_encoder_bias(
     env_ids = env_ids.to(env.device, dtype=torch.int)
 
   joint_ids = asset_cfg.joint_ids
-  if isinstance(joint_ids, slice):
-    num_joints = asset.num_joints
-    joint_ids_tensor = torch.arange(num_joints, device=env.device)
-  else:
-    joint_ids_tensor = torch.tensor(joint_ids, device=env.device)
+  q_indices = asset.indexing.expand_to_q_indices(joint_ids)
 
-  num_joints = len(joint_ids_tensor)
+  if isinstance(q_indices, slice):
+    nq = asset.nq
+  else:
+    nq = len(q_indices)
+
   bias_samples = sample_uniform(
     torch.tensor(bias_range[0], device=env.device),
     torch.tensor(bias_range[1], device=env.device),
-    (len(env_ids), num_joints),
+    (len(env_ids), nq),
     env.device,
   )
 
-  if isinstance(joint_ids, slice):
+  if isinstance(q_indices, slice):
     asset.data.encoder_bias[env_ids] = bias_samples
   else:
-    asset.data.encoder_bias[env_ids[:, None], joint_ids_tensor] = bias_samples
+    asset.data.encoder_bias[env_ids[:, None], q_indices] = bias_samples
 
 
 def sync_actuator_delays(
