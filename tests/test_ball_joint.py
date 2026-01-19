@@ -117,18 +117,22 @@ def test_joint_offset_tensors(device):
 
   # Test expand_to_q_indices for single joint (ball1).
   q_indices = indexing.expand_to_q_indices(torch.tensor([0], device=device))
+  assert isinstance(q_indices, torch.Tensor)
   assert torch.equal(q_indices, torch.tensor([0, 1, 2, 3], device=device))
 
   # Test expand_to_v_indices for single joint (ball1).
   v_indices = indexing.expand_to_v_indices(torch.tensor([0], device=device))
+  assert isinstance(v_indices, torch.Tensor)
   assert torch.equal(v_indices, torch.tensor([0, 1, 2], device=device))
 
   # Test expand for hinge joint (joint 1).
   q_indices = indexing.expand_to_q_indices(torch.tensor([1], device=device))
+  assert isinstance(q_indices, torch.Tensor)
   assert torch.equal(q_indices, torch.tensor([4], device=device))
 
   # Test expand for multiple joints (ball1, ball2).
   q_indices = indexing.expand_to_q_indices(torch.tensor([0, 2], device=device))
+  assert isinstance(q_indices, torch.Tensor)
   assert torch.equal(q_indices, torch.tensor([0, 1, 2, 3, 5, 6, 7, 8], device=device))
 
 
@@ -292,8 +296,12 @@ def test_mdp_joint_pos_rel_with_ball_joints(device):
   # Get relative joint positions.
   result = observations.joint_pos_rel(env, biased=False, asset_cfg=asset_cfg)
 
-  # Should have shape (1, nq=9), not (1, num_joints=3).
-  assert result.shape == (1, 9), f"Expected (1, 9), got {result.shape}"
+  # Should have shape (1, nv=7) in DOF space, not (1, nq=9) in qpos space.
+  # Ball joints contribute 3 DOF (axis-angle) instead of 4 qpos (quaternion).
+  assert result.shape == (1, 7), f"Expected (1, 7), got {result.shape}"
+
+  # At default position, all relative positions should be zero.
+  assert torch.allclose(result, torch.zeros_like(result), atol=1e-6)
 
 
 def test_mdp_joint_vel_rel_with_ball_joints(device):
@@ -383,3 +391,50 @@ def test_mdp_joint_pos_limits_with_ball_joints(device):
 
   # Should return scalar per env.
   assert result.shape == (1,), f"Expected (1,), got {result.shape}"
+
+
+def test_quaternion_difference_correctness(device):
+  """Test that joint_pos_rel computes correct quaternion difference.
+
+  For a 90-degree rotation around z-axis, the axis-angle representation
+  should be [0, 0, pi/2] (rotation axis z, angle 90 degrees).
+  """
+  import math
+  from unittest.mock import Mock
+
+  from mjlab.envs.mdp import observations
+  from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+  entity = create_ball_joint_entity()
+  entity, sim = initialize_entity(entity, device)
+
+  # Apply a 90-degree rotation around z-axis to ball joint 1.
+  # Quaternion for 90 deg around z: (cos(45°), 0, 0, sin(45°)) = (0.7071, 0, 0, 0.7071)
+  angle = math.pi / 2
+  half_angle = angle / 2
+  new_pos = entity.data.joint_pos.clone()
+  new_pos[0, 0:4] = torch.tensor(
+    [math.cos(half_angle), 0.0, 0.0, math.sin(half_angle)], device=device
+  )
+  entity.data.write_joint_position(new_pos)
+  sim.forward()
+
+  env = Mock()
+  env.scene = {"robot": entity}
+
+  asset_cfg = SceneEntityCfg("robot", joint_ids=slice(None))
+  result = observations.joint_pos_rel(env, biased=False, asset_cfg=asset_cfg)
+
+  # Ball joint 1 (indices 0:3 in DOF space) should have axis-angle [0, 0, pi/2].
+  ball1_diff = result[0, 0:3]
+  expected_axis_angle = torch.tensor([0.0, 0.0, math.pi / 2], device=device)
+  assert torch.allclose(ball1_diff, expected_axis_angle, atol=1e-4), (
+    f"Expected axis-angle {expected_axis_angle}, got {ball1_diff}"
+  )
+
+  # Hinge joint (index 3 in DOF space) should be unchanged (0).
+  assert abs(result[0, 3].item()) < 1e-6
+
+  # Ball joint 2 (indices 4:7 in DOF space) should be unchanged (identity -> 0).
+  ball2_diff = result[0, 4:7]
+  assert torch.allclose(ball2_diff, torch.zeros(3, device=device), atol=1e-6)
