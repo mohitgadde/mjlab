@@ -77,7 +77,7 @@ def test_nq_nv_with_ball_joints(device):
   Hinge joints have 1 qpos and 1 qvel.
   """
   entity = create_ball_joint_entity()
-  entity, sim = initialize_entity(entity, device)
+  entity, _ = initialize_entity(entity, device)
 
   # Entity has: ball1 (4 qpos, 3 dof), hinge1 (1 qpos, 1 dof), ball2 (4 qpos, 3 dof)
   # Total: 4 + 1 + 4 = 9 qpos, 3 + 1 + 3 = 7 dof
@@ -93,7 +93,7 @@ def test_nq_nv_with_ball_joints(device):
 def test_nq_nv_hinge_only(device):
   """Test that nq and nv equal num_joints for hinge-only entities."""
   entity = create_hinge_only_entity()
-  entity, sim = initialize_entity(entity, device)
+  entity, _ = initialize_entity(entity, device)
 
   # Entity has: hinge1 (1 qpos, 1 dof), hinge2 (1 qpos, 1 dof)
   assert entity.num_joints == 2
@@ -104,7 +104,7 @@ def test_nq_nv_hinge_only(device):
 def test_joint_offset_tensors(device):
   """Test that q_offsets and v_offsets are correctly computed."""
   entity = create_ball_joint_entity()
-  entity, sim = initialize_entity(entity, device)
+  entity, _ = initialize_entity(entity, device)
 
   indexing = entity.indexing
 
@@ -135,7 +135,7 @@ def test_joint_offset_tensors(device):
 def test_joint_qpos_widths(device):
   """Test that joint_qpos_widths and joint_dof_widths are correct."""
   entity = create_ball_joint_entity()
-  entity, sim = initialize_entity(entity, device)
+  entity, _ = initialize_entity(entity, device)
 
   indexing = entity.indexing
 
@@ -150,7 +150,7 @@ def test_joint_qpos_widths(device):
 def test_ball_joint_initial_state(device):
   """Test that ball joints default to identity quaternion (1, 0, 0, 0)."""
   entity = create_ball_joint_entity()
-  entity, sim = initialize_entity(entity, device)
+  entity, _ = initialize_entity(entity, device)
 
   # Check default joint positions have correct shape.
   default_joint_pos = entity.data.default_joint_pos
@@ -175,7 +175,7 @@ def test_ball_joint_initial_state(device):
 def test_default_joint_vel_shape(device):
   """Test that default_joint_vel has correct shape (nv, not num_joints)."""
   entity = create_ball_joint_entity()
-  entity, sim = initialize_entity(entity, device)
+  entity, _ = initialize_entity(entity, device)
 
   default_joint_vel = entity.data.default_joint_vel
   assert default_joint_vel.shape == (1, 7), (
@@ -186,7 +186,7 @@ def test_default_joint_vel_shape(device):
 def test_joint_pos_target_shape(device):
   """Test that joint_pos_target has correct shape (nq) for non-actuated entity."""
   entity = create_ball_joint_entity()
-  entity, sim = initialize_entity(entity, device)
+  entity, _ = initialize_entity(entity, device)
 
   # Non-actuated entities have empty target tensors.
   joint_pos_target = entity.data.joint_pos_target
@@ -198,7 +198,7 @@ def test_joint_pos_target_shape(device):
 def test_joint_vel_target_shape(device):
   """Test that joint_vel_target has correct shape (nv) for non-actuated entity."""
   entity = create_ball_joint_entity()
-  entity, sim = initialize_entity(entity, device)
+  entity, _ = initialize_entity(entity, device)
 
   # Non-actuated entities have empty target tensors.
   joint_vel_target = entity.data.joint_vel_target
@@ -267,3 +267,119 @@ def test_write_joint_velocity_with_ball_joints(device):
   # Read back and verify.
   joint_vel = entity.data.joint_vel
   assert torch.allclose(joint_vel, new_vel, atol=1e-4)
+
+
+##
+# MDP function tests with ball joints.
+##
+
+
+def test_mdp_joint_pos_rel_with_ball_joints(device):
+  """Test joint_pos_rel observation with ball joints."""
+  from unittest.mock import Mock
+
+  from mjlab.envs.mdp import observations
+  from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+  entity = create_ball_joint_entity()
+  entity, _ = initialize_entity(entity, device)
+
+  env = Mock()
+  env.scene = {"robot": entity}
+
+  asset_cfg = SceneEntityCfg("robot", joint_ids=slice(None))
+
+  # Get relative joint positions.
+  result = observations.joint_pos_rel(env, biased=False, asset_cfg=asset_cfg)
+
+  # Should have shape (1, nq=9), not (1, num_joints=3).
+  assert result.shape == (1, 9), f"Expected (1, 9), got {result.shape}"
+
+
+def test_mdp_joint_vel_rel_with_ball_joints(device):
+  """Test joint_vel_rel observation with ball joints."""
+  from unittest.mock import Mock
+
+  from mjlab.envs.mdp import observations
+  from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+  entity = create_ball_joint_entity()
+  entity, _ = initialize_entity(entity, device)
+
+  env = Mock()
+  env.scene = {"robot": entity}
+
+  asset_cfg = SceneEntityCfg("robot", joint_ids=slice(None))
+
+  # Get relative joint velocities.
+  result = observations.joint_vel_rel(env, asset_cfg=asset_cfg)
+
+  # Should have shape (1, nv=7), not (1, num_joints=3).
+  assert result.shape == (1, 7), f"Expected (1, 7), got {result.shape}"
+
+
+def test_mdp_joint_vel_l2_with_ball_joints(device):
+  """Test joint_vel_l2 reward with ball joints."""
+  from unittest.mock import Mock
+
+  from mjlab.envs.mdp import rewards
+  from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+  entity = create_ball_joint_entity()
+  entity, _ = initialize_entity(entity, device)
+
+  env = Mock()
+  env.scene = {"robot": entity}
+
+  asset_cfg = SceneEntityCfg("robot", joint_ids=slice(None))
+
+  # Compute joint velocity L2 penalty.
+  result = rewards.joint_vel_l2(env, asset_cfg=asset_cfg)
+
+  # Should return scalar per env.
+  assert result.shape == (1,), f"Expected (1,), got {result.shape}"
+
+
+def test_mdp_joint_acc_l2_with_ball_joints(device):
+  """Test joint_acc_l2 reward with ball joints."""
+  from unittest.mock import Mock
+
+  from mjlab.envs.mdp import rewards
+  from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+  entity = create_ball_joint_entity()
+  entity, _ = initialize_entity(entity, device)
+
+  env = Mock()
+  env.scene = {"robot": entity}
+
+  asset_cfg = SceneEntityCfg("robot", joint_ids=slice(None))
+
+  # Compute joint acceleration L2 penalty.
+  result = rewards.joint_acc_l2(env, asset_cfg=asset_cfg)
+
+  # Should return scalar per env.
+  assert result.shape == (1,), f"Expected (1,), got {result.shape}"
+
+
+def test_mdp_joint_pos_limits_with_ball_joints(device):
+  """Test joint_pos_limits reward with ball joints."""
+  from unittest.mock import Mock
+
+  from mjlab.envs.mdp import rewards
+  from mjlab.managers.scene_entity_config import SceneEntityCfg
+
+  entity = create_ball_joint_entity()
+  entity, _ = initialize_entity(entity, device)
+
+  env = Mock()
+  env.device = device
+  env.scene = {"robot": entity}
+
+  asset_cfg = SceneEntityCfg("robot", joint_ids=slice(None))
+
+  # Compute joint position limits penalty.
+  result = rewards.joint_pos_limits(env, asset_cfg=asset_cfg)
+
+  # Should return scalar per env.
+  assert result.shape == (1,), f"Expected (1,), got {result.shape}"
