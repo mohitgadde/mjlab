@@ -113,6 +113,9 @@ class Actuator(ABC, Generic[ActuatorCfgT]):
     self._ctrl_ids: torch.Tensor | None = None
     self._mjs_actuators: list[mujoco.MjsActuator] = []
     self._site_zeros: torch.Tensor | None = None
+    # Expanded indices for ball joint support.
+    self._q_indices: torch.Tensor | None = None
+    self._v_indices: torch.Tensor | None = None
 
   @property
   def target_ids(self) -> torch.Tensor:
@@ -173,6 +176,15 @@ class Actuator(ABC, Generic[ActuatorCfgT]):
     ctrl_ids_list = [act.id for act in self._mjs_actuators]
     self._ctrl_ids = torch.tensor(ctrl_ids_list, dtype=torch.long, device=device)
 
+    # Compute expanded indices for ball joint support.
+    if self.transmission_type == TransmissionType.JOINT:
+      indexing = self.entity.indexing
+      q_indices = indexing.expand_to_q_indices(self._target_ids_list)
+      v_indices = indexing.expand_to_v_indices(self._target_ids_list)
+      assert isinstance(q_indices, torch.Tensor) and isinstance(v_indices, torch.Tensor)
+      self._q_indices = q_indices
+      self._v_indices = v_indices
+
     # Pre-allocate zeros for SITE transmission type to avoid repeated allocations.
     if self.transmission_type == TransmissionType.SITE:
       nenvs = data.nworld
@@ -190,11 +202,11 @@ class Actuator(ABC, Generic[ActuatorCfgT]):
     """
     if self.transmission_type == TransmissionType.JOINT:
       return ActuatorCmd(
-        position_target=data.joint_pos_target[:, self.target_ids],
-        velocity_target=data.joint_vel_target[:, self.target_ids],
-        effort_target=data.joint_effort_target[:, self.target_ids],
-        pos=data.joint_pos[:, self.target_ids],
-        vel=data.joint_vel[:, self.target_ids],
+        position_target=data.joint_pos_target[:, self._q_indices],
+        velocity_target=data.joint_vel_target[:, self._v_indices],
+        effort_target=data.joint_effort_target[:, self._v_indices],
+        pos=data.joint_pos[:, self._q_indices],
+        vel=data.joint_vel[:, self._v_indices],
       )
     elif self.transmission_type == TransmissionType.TENDON:
       return ActuatorCmd(
