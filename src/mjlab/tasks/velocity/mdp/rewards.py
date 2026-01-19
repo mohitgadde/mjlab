@@ -8,7 +8,7 @@ from mjlab.entity import Entity
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import BuiltinSensor, ContactSensor
-from mjlab.utils.lab_api.math import quat_apply_inverse
+from mjlab.utils.lab_api.math import quat_apply_inverse, quat_box_minus
 from mjlab.utils.lab_api.string import (
   resolve_matching_names_values,
 )
@@ -314,26 +314,32 @@ class variable_posture:
     self._joint_ids = torch.tensor(joint_ids, device=env.device, dtype=torch.long)
 
     _, _, std_standing = resolve_matching_names_values(
-      data=cfg.params["std_standing"],
-      list_of_strings=joint_names,
+      data=cfg.params["std_standing"], list_of_strings=joint_names
+    )
+    _, _, std_walking = resolve_matching_names_values(
+      data=cfg.params["std_walking"], list_of_strings=joint_names
+    )
+    _, _, std_running = resolve_matching_names_values(
+      data=cfg.params["std_running"], list_of_strings=joint_names
     )
     self.std_standing = torch.tensor(
       std_standing, device=env.device, dtype=torch.float32
     )
-
-    _, _, std_walking = resolve_matching_names_values(
-      data=cfg.params["std_walking"],
-      list_of_strings=joint_names,
-    )
     self.std_walking = torch.tensor(std_walking, device=env.device, dtype=torch.float32)
-
-    _, _, std_running = resolve_matching_names_values(
-      data=cfg.params["std_running"],
-      list_of_strings=joint_names,
-    )
     self.std_running = torch.tensor(std_running, device=env.device, dtype=torch.float32)
 
+    self._joint_dof_widths = asset.indexing.joint_dof_widths[self._joint_ids]
     self._joint_qpos_widths = asset.indexing.joint_qpos_widths[self._joint_ids]
+    self._q_offsets = asset.indexing.q_offsets[self._joint_ids]
+    self._is_ball_joint = (self._joint_qpos_widths == 4) & (self._joint_dof_widths == 3)
+
+    # Precompute cumulative DOF offsets for output indexing.
+    self._dof_cumsum = torch.cat(
+      [
+        torch.zeros(1, device=env.device, dtype=self._joint_dof_widths.dtype),
+        self._joint_dof_widths.cumsum(0)[:-1],
+      ]
+    )
 
   def __call__(
     self,
@@ -352,9 +358,7 @@ class variable_posture:
     command = env.command_manager.get_command(command_name)
     assert command is not None
 
-    linear_speed = torch.norm(command[:, :2], dim=1)
-    angular_speed = torch.abs(command[:, 2])
-    total_speed = linear_speed + angular_speed
+    total_speed = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
 
     standing_mask = (total_speed < walking_threshold).float()
     walking_mask = (
@@ -363,9 +367,9 @@ class variable_posture:
     running_mask = (total_speed >= running_threshold).float()
 
     # Expand std to qpos dimensions for ball joints.
-    std_standing_exp = self.std_standing.repeat_interleave(self._joint_qpos_widths)
-    std_walking_exp = self.std_walking.repeat_interleave(self._joint_qpos_widths)
-    std_running_exp = self.std_running.repeat_interleave(self._joint_qpos_widths)
+    std_standing_exp = self.std_standing.repeat_interleave(self._joint_dof_widths)
+    std_walking_exp = self.std_walking.repeat_interleave(self._joint_dof_widths)
+    std_running_exp = self.std_running.repeat_interleave(self._joint_dof_widths)
 
     std = (
       std_standing_exp * standing_mask.unsqueeze(1)
@@ -373,9 +377,43 @@ class variable_posture:
       + std_running_exp * running_mask.unsqueeze(1)
     )
 
-    q_indices = asset.indexing.expand_to_q_indices(self._joint_ids)
-    current_joint_pos = asset.data.joint_pos[:, q_indices]
-    desired_joint_pos = self.default_joint_pos[:, q_indices]
-    error_squared = torch.square(current_joint_pos - desired_joint_pos)
+    joint_pos = asset.data.joint_pos
+    num_envs = joint_pos.shape[0]
+    device = joint_pos.device
 
+    total_dof = int(self._joint_dof_widths.sum().item())
+    error = torch.zeros((num_envs, total_dof), device=device, dtype=joint_pos.dtype)
+
+    # Ball joints: quaternion difference.
+    if self._is_ball_joint.any():
+      ball_q_offsets = self._q_offsets[self._is_ball_joint]
+      ball_out_offsets = self._dof_cumsum[self._is_ball_joint]
+
+      ball_q_indices = ball_q_offsets.unsqueeze(1) + torch.arange(4, device=device)
+      current_quats = joint_pos[:, ball_q_indices.flatten()].view(num_envs, -1, 4)
+      default_quats = self.default_joint_pos[:, ball_q_indices.flatten()].view(
+        num_envs, -1, 4
+      )
+
+      num_ball = current_quats.shape[1]
+      diff_flat = quat_box_minus(
+        current_quats.reshape(-1, 4), default_quats.reshape(-1, 4)
+      )
+      diff = diff_flat.view(num_envs, num_ball, 3)
+
+      ball_out_indices = ball_out_offsets.unsqueeze(1) + torch.arange(3, device=device)
+      error[:, ball_out_indices.flatten()] = diff.reshape(num_envs, -1)
+
+    # Hinge joints: scalar subtraction.
+    is_hinge_joint = ~self._is_ball_joint
+    if is_hinge_joint.any():
+      hinge_q_offsets = self._q_offsets[is_hinge_joint]
+      hinge_out_offsets = self._dof_cumsum[is_hinge_joint]
+
+      diff_hinge = (
+        joint_pos[:, hinge_q_offsets] - self.default_joint_pos[:, hinge_q_offsets]
+      )
+      error[:, hinge_out_offsets] = diff_hinge
+
+    error_squared = torch.square(error)
     return torch.exp(-torch.mean(error_squared / (std**2), dim=1))

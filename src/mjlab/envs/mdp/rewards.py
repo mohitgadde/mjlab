@@ -9,6 +9,7 @@ import torch
 from mjlab.entity import Entity
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.utils.lab_api.math import quat_box_minus
 from mjlab.utils.lab_api.string import (
   resolve_matching_names_values,
 )
@@ -114,9 +115,7 @@ class posture:
     assert default_joint_pos is not None
     self.default_joint_pos = default_joint_pos
 
-    joint_ids, joint_names = asset.find_joints(
-      cfg.params["asset_cfg"].joint_names,
-    )
+    joint_ids, joint_names = asset.find_joints(cfg.params["asset_cfg"].joint_names)
     self._joint_ids = torch.tensor(joint_ids, device=env.device, dtype=torch.long)
 
     _, _, std = resolve_matching_names_values(
@@ -124,19 +123,67 @@ class posture:
       list_of_strings=joint_names,
     )
     self.std = torch.tensor(std, device=env.device, dtype=torch.float32)
+
+    self._joint_dof_widths = asset.indexing.joint_dof_widths[self._joint_ids]
     self._joint_qpos_widths = asset.indexing.joint_qpos_widths[self._joint_ids]
+    self._q_offsets = asset.indexing.q_offsets[self._joint_ids]
+    self._is_ball_joint = (self._joint_qpos_widths == 4) & (self._joint_dof_widths == 3)
+
+    # Precompute cumulative DOF offsets for output indexing.
+    self._dof_cumsum = torch.cat(
+      [
+        torch.zeros(1, device=env.device, dtype=self._joint_dof_widths.dtype),
+        self._joint_dof_widths.cumsum(0)[:-1],
+      ]
+    )
+    self._std_expanded = self.std.repeat_interleave(self._joint_dof_widths)
 
   def __call__(
     self, env: ManagerBasedRlEnv, std, asset_cfg: SceneEntityCfg
   ) -> torch.Tensor:
     del std  # Unused.
+
     asset: Entity = env.scene[asset_cfg.name]
-    q_indices = asset.indexing.expand_to_q_indices(self._joint_ids)
-    current_joint_pos = asset.data.joint_pos[:, q_indices]
-    desired_joint_pos = self.default_joint_pos[:, q_indices]
-    error_squared = torch.square(current_joint_pos - desired_joint_pos)
-    std_expanded = self.std.repeat_interleave(self._joint_qpos_widths)
-    return torch.exp(-torch.mean(error_squared / (std_expanded**2), dim=1))
+    joint_pos = asset.data.joint_pos
+    num_envs = joint_pos.shape[0]
+    device = joint_pos.device
+
+    total_dof = int(self._joint_dof_widths.sum().item())
+    error = torch.zeros((num_envs, total_dof), device=device, dtype=joint_pos.dtype)
+
+    # Ball joints: quaternion difference.
+    if self._is_ball_joint.any():
+      ball_q_offsets = self._q_offsets[self._is_ball_joint]
+      ball_out_offsets = self._dof_cumsum[self._is_ball_joint]
+
+      ball_q_indices = ball_q_offsets.unsqueeze(1) + torch.arange(4, device=device)
+      current_quats = joint_pos[:, ball_q_indices.flatten()].view(num_envs, -1, 4)
+      default_quats = self.default_joint_pos[:, ball_q_indices.flatten()].view(
+        num_envs, -1, 4
+      )
+
+      num_ball = current_quats.shape[1]
+      diff_flat = quat_box_minus(
+        current_quats.reshape(-1, 4), default_quats.reshape(-1, 4)
+      )
+      diff = diff_flat.view(num_envs, num_ball, 3)
+
+      ball_out_indices = ball_out_offsets.unsqueeze(1) + torch.arange(3, device=device)
+      error[:, ball_out_indices.flatten()] = diff.reshape(num_envs, -1)
+
+    # Hinge joints: scalar subtraction.
+    is_hinge_joint = ~self._is_ball_joint
+    if is_hinge_joint.any():
+      hinge_q_offsets = self._q_offsets[is_hinge_joint]
+      hinge_out_offsets = self._dof_cumsum[is_hinge_joint]
+
+      diff_hinge = (
+        joint_pos[:, hinge_q_offsets] - self.default_joint_pos[:, hinge_q_offsets]
+      )
+      error[:, hinge_out_offsets] = diff_hinge
+
+    error_squared = torch.square(error)
+    return torch.exp(-torch.mean(error_squared / (self._std_expanded**2), dim=1))
 
 
 class electrical_power_cost:
