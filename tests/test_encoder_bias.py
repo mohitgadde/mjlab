@@ -23,7 +23,7 @@ from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationT
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
-from mjlab.terrains import TerrainImporterCfg
+from mjlab.terrains import TerrainEntityCfg
 
 # =============================================================================
 # Test fixtures and helpers
@@ -67,13 +67,13 @@ def _make_env_cfg(
     obs_func = partial(mdp.joint_pos_rel, biased=True)
   return ManagerBasedRlEnvCfg(
     scene=SceneCfg(
-      terrain=TerrainImporterCfg(terrain_type="plane"),
+      terrain=TerrainEntityCfg(terrain_type="plane"),
       num_envs=num_envs,
       extent=1.0,
       entities={"robot": _make_robot_cfg()},
     ),
     observations={
-      "policy": ObservationGroupCfg(
+      "actor": ObservationGroupCfg(
         terms={"obs": ObservationTermCfg(func=obs_func)},
       ),
     },
@@ -154,12 +154,12 @@ def test_joint_pos_rel_includes_encoder_bias(device):
   robot = env.scene["robot"]
   bias = 0.5
 
-  obs_before = env.observation_manager.compute()["policy"]
+  obs_before = env.observation_manager.compute()["actor"]
   assert isinstance(obs_before, torch.Tensor)
   obs_before = obs_before.clone()
   robot.data.encoder_bias[:, 0] = bias
   env.observation_manager._obs_buffer = None  # Invalidate cache.
-  obs_after = env.observation_manager.compute()["policy"]
+  obs_after = env.observation_manager.compute()["actor"]
 
   # Observation should increase by bias amount.
   torch.testing.assert_close(obs_after, obs_before + bias, atol=1e-5, rtol=0)
@@ -174,12 +174,12 @@ def test_joint_vel_rel_ignores_encoder_bias(device):
 
   robot = env.scene["robot"]
 
-  obs_before = env.observation_manager.compute()["policy"]
+  obs_before = env.observation_manager.compute()["actor"]
   assert isinstance(obs_before, torch.Tensor)
   obs_before = obs_before.clone()
   robot.data.encoder_bias[:, 0] = 0.5
   env.observation_manager._obs_buffer = None
-  obs_after = env.observation_manager.compute()["policy"]
+  obs_after = env.observation_manager.compute()["actor"]
 
   torch.testing.assert_close(obs_before, obs_after, atol=1e-6, rtol=0)
 
@@ -250,7 +250,7 @@ def test_bias_compensation_produces_identical_physical_behavior(device):
 
   # Observations should differ by bias.
   env.observation_manager._obs_buffer = None
-  obs = env.observation_manager.compute()["policy"]
+  obs = env.observation_manager.compute()["actor"]
   assert isinstance(obs, torch.Tensor)
   obs_diff = obs[1, 0].item() - obs[0, 0].item()
   assert obs_diff == pytest.approx(bias_env1 - bias_env0, abs=1e-4)
@@ -267,13 +267,13 @@ def test_randomize_encoder_bias_event(device):
   """randomize_encoder_bias should sample values within specified range."""
   env_cfg = ManagerBasedRlEnvCfg(
     scene=SceneCfg(
-      terrain=TerrainImporterCfg(terrain_type="plane"),
+      terrain=TerrainEntityCfg(terrain_type="plane"),
       num_envs=100,
       extent=10.0,
       entities={"robot": _make_robot_cfg()},
     ),
     observations={
-      "policy": ObservationGroupCfg(
+      "actor": ObservationGroupCfg(
         terms={"obs": ObservationTermCfg(func=partial(mdp.joint_pos_rel, biased=True))},
       ),
     },
@@ -284,7 +284,7 @@ def test_randomize_encoder_bias_event(device):
     },
     events={
       "randomize_bias": EventTermCfg(
-        func=mdp.randomize_encoder_bias,
+        func=mdp.dr.encoder_bias,
         mode="startup",
         params={"bias_range": (-0.1, 0.1), "asset_cfg": SceneEntityCfg("robot")},
       )

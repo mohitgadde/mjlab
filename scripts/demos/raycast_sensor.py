@@ -28,6 +28,7 @@ import numpy as np
 import torch
 import tyro
 
+import mjlab
 import mjlab.terrains as terrain_gen
 from mjlab.entity import EntityCfg
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
@@ -39,8 +40,8 @@ from mjlab.sensor import (
   PinholeCameraPatternCfg,
   RayCastSensorCfg,
 )
+from mjlab.terrains.terrain_entity import TerrainEntityCfg
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
-from mjlab.terrains.terrain_importer import TerrainImporterCfg
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
@@ -116,7 +117,7 @@ def create_env_cfg(
     add_lights=True,
   )
 
-  terrain_cfg = TerrainImporterCfg(
+  terrain_cfg = TerrainEntityCfg(
     terrain_type="generator",
     terrain_generator=custom_terrain_cfg,
     num_envs=1,
@@ -248,4 +249,4 @@ def main(
 
 
 if __name__ == "__main__":
-  tyro.cli(main)
+  tyro.cli(main, config=mjlab.TYRO_FLAGS)

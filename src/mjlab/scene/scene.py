@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,20 +12,40 @@ import torch
 
 from mjlab.entity import Entity, EntityCfg
 from mjlab.sensor import BuiltinSensor, Sensor, SensorCfg
-from mjlab.terrains.terrain_importer import TerrainImporter, TerrainImporterCfg
+from mjlab.sensor.camera_sensor import CameraSensor
+from mjlab.sensor.raycast_sensor import RayCastSensor
+from mjlab.sensor.sensor_context import SensorContext
+from mjlab.terrains.terrain_entity import TerrainEntity, TerrainEntityCfg
 
 _SCENE_XML = Path(__file__).parent / "scene.xml"
 
 
 @dataclass(kw_only=True)
 class SceneCfg:
+  """Configuration for a simulation scene."""
+
   num_envs: int = 1
+  """Number of parallel environments."""
+
   env_spacing: float = 2.0
-  terrain: TerrainImporterCfg | None = None
+  """Spacing between environment origins in meters."""
+
+  terrain: TerrainEntityCfg | None = None
+  """Terrain configuration. If ``None``, no terrain is added."""
+
   entities: dict[str, EntityCfg] = field(default_factory=dict)
+  """Mapping of entity names to their configurations."""
+
   sensors: tuple[SensorCfg, ...] = field(default_factory=tuple)
+  """Sensor configurations to attach to the scene."""
+
   extent: float | None = None
+  """Override for ``mjModel.stat.extent``. If ``None``, MuJoCo computes
+  it automatically."""
+
   spec_fn: Callable[[mujoco.MjSpec], None] | None = None
+  """Optional callback to modify the ``MjSpec`` after entities and sensors
+  have been added but before compilation."""
 
 
 class Scene:
@@ -32,8 +54,9 @@ class Scene:
     self._device = device
     self._entities: dict[str, Entity] = {}
     self._sensors: dict[str, Sensor] = {}
-    self._terrain: TerrainImporter | None = None
+    self._terrain: TerrainEntity | None = None
     self._default_env_origins: torch.Tensor | None = None
+    self._sensor_context: SensorContext | None = None
 
     self._spec = mujoco.MjSpec.from_file(str(_SCENE_XML))
     if self._cfg.extent is not None:
@@ -89,7 +112,7 @@ class Scene:
     return self._sensors
 
   @property
-  def terrain(self) -> TerrainImporter | None:
+  def terrain(self) -> TerrainEntity | None:
     return self._terrain
 
   @property
@@ -101,11 +124,6 @@ class Scene:
     return self._device
 
   def __getitem__(self, key: str) -> Any:
-    if key == "terrain":
-      if self._terrain is None:
-        raise KeyError("No terrain configured in this scene.")
-      return self._terrain
-
     if key in self._sensors:
       return self._sensors[key]
     if key in self._entities:
@@ -113,11 +131,14 @@ class Scene:
 
     # Not found, raise helpful error.
     available = list(self._entities.keys()) + list(self._sensors.keys())
-    if self._terrain is not None:
-      available.append("terrain")
     raise KeyError(f"Scene element '{key}' not found. Available: {available}")
 
   # Methods.
+
+  @property
+  def sensor_context(self) -> SensorContext | None:
+    """Shared sensing resources, or None if no cameras/raycasts."""
+    return self._sensor_context
 
   def initialize(
     self,
@@ -132,6 +153,20 @@ class Scene:
       ent.initialize(mj_model, model, data, self._device)
     for sensor in self._sensors.values():
       sensor.initialize(mj_model, model, data, self._device)
+
+    # Create SensorContext if any sensors require it.
+    ctx_sensors = [s for s in self._sensors.values() if s.requires_sensor_context]
+    if ctx_sensors:
+      camera_sensors = [s for s in ctx_sensors if isinstance(s, CameraSensor)]
+      raycast_sensors = [s for s in ctx_sensors if isinstance(s, RayCastSensor)]
+      self._sensor_context = SensorContext(
+        mj_model=mj_model,
+        model=model,
+        data=data,
+        camera_sensors=camera_sensors,
+        raycast_sensors=raycast_sensors,
+        device=self._device,
+      )
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     for ent in self._entities.values():
@@ -176,16 +211,22 @@ class Scene:
     if key_qpos:
       combined_qpos = np.concatenate(key_qpos)
       combined_ctrl = np.concatenate(key_ctrl)
-      self._spec.add_key(name="init_state", qpos=combined_qpos, ctrl=combined_ctrl)
+      self._spec.add_key(
+        name="init_state",
+        qpos=combined_qpos.tolist(),
+        ctrl=combined_ctrl.tolist(),
+      )
 
   def _add_terrain(self) -> None:
     if self._cfg.terrain is None:
       return
     self._cfg.terrain.num_envs = self._cfg.num_envs
     self._cfg.terrain.env_spacing = self._cfg.env_spacing
-    self._terrain = TerrainImporter(self._cfg.terrain, self._device)
+    terrain = TerrainEntity(self._cfg.terrain, device=self._device)
+    self._terrain = terrain
+    self._entities["terrain"] = terrain
     frame = self._spec.worldbody.add_frame()
-    self._spec.attach(self._terrain.spec, prefix="", frame=frame)
+    self._spec.attach(terrain.spec, prefix="", frame=frame)
 
   def _add_sensors(self) -> None:
     for sensor_cfg in self._cfg.sensors:

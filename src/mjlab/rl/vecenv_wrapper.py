@@ -46,7 +46,7 @@ class RslRlVecEnvWrapper(VecEnv):
 
   @property
   def unwrapped(self) -> ManagerBasedRlEnv:
-    return self.env
+    return self.env.unwrapped
 
   # Properties.
 
@@ -55,7 +55,7 @@ class RslRlVecEnvWrapper(VecEnv):
     return self.unwrapped.episode_length_buf
 
   @episode_length_buf.setter
-  def episode_length_buf(self, value: torch.Tensor) -> None:  # type: ignore
+  def episode_length_buf(self, value: torch.Tensor) -> None:  # pyright: ignore[reportIncompatibleVariableOverride]
     self.unwrapped.episode_length_buf = value
 
   def seed(self, seed: int = -1) -> int:

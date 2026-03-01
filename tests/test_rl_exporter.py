@@ -19,7 +19,7 @@ from mjlab.rl.exporter_utils import (
 )
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
-from mjlab.terrains import TerrainImporterCfg
+from mjlab.terrains import TerrainEntityCfg
 
 
 def test_list_to_csv_str():
@@ -136,13 +136,13 @@ def test_get_base_metadata_skips_non_actuated_joints(device):
 
   env_cfg = ManagerBasedRlEnvCfg(
     scene=SceneCfg(
-      terrain=TerrainImporterCfg(terrain_type="plane"),
+      terrain=TerrainEntityCfg(terrain_type="plane"),
       num_envs=1,
       extent=1.0,
       entities={"robot": robot_cfg},
     ),
     observations={
-      "policy": ObservationGroupCfg(
+      "actor": ObservationGroupCfg(
         terms={
           "joint_pos": ObservationTermCfg(
             func=lambda env: env.scene["robot"].data.joint_pos
