@@ -429,6 +429,8 @@ def test_reset_joints_by_offset(device):
 
   mock_entity = Mock()
   mock_entity.num_joints = 3
+  mock_entity.nq = 3
+  mock_entity.nv = 3
   mock_entity.data.default_joint_pos = torch.zeros((2, 3), device=device)
   mock_entity.data.default_joint_vel = torch.zeros((2, 3), device=device)
   mock_entity.data.soft_joint_pos_limits = torch.tensor(
